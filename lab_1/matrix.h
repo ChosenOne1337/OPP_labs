@@ -1,18 +1,16 @@
 #ifndef MATRIX_H
 #define MATRIX_H
 
-typedef unsigned long ulong;
-
 typedef struct Matrix {
-    ulong rows;
-    ulong cols;
+    int rows;
+    int cols;
     double *data;
 } Matrix;
 
 #define elem_at(mat, row, col) \
     ((mat)->data[(row) * (mat)->cols + (col)])
 
-Matrix* matrix_create(ulong rows, ulong cols);
+Matrix* matrix_create(int rows, int cols);
 
 void matrix_destroy(Matrix *mat);
 

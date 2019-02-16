@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include "matrix.h"
 
-Matrix* matrix_create(ulong rows, ulong cols) {
+Matrix* matrix_create(int rows, int cols) {
     Matrix *mat = (Matrix*)malloc(sizeof(Matrix));
     if (mat == NULL) {
         return NULL;
@@ -31,10 +31,10 @@ int matrix_mult(Matrix *leftMat, Matrix *rightMat, Matrix *resMat) {
         return -1;
     }
 
-    for (ulong row = 0; row < resMat->rows; ++row) {
-        for (ulong col = 0; col < resMat->cols; ++col) {
+    for (int row = 0; row < resMat->rows; ++row) {
+        for (int col = 0; col < resMat->cols; ++col) {
             elem_at(resMat, row, col) = 0.0;
-            for (ulong j = 0; j < leftMat->cols; ++j) {
+            for (int j = 0; j < leftMat->cols; ++j) {
                 elem_at(resMat, row, col) += elem_at(leftMat, row, j) * elem_at(rightMat, j, col);
             }
         }
@@ -49,8 +49,8 @@ int matrix_add(Matrix *leftMat, Matrix *rightMat) {
         return -1;
     }
 
-    for (ulong row = 0; row < leftMat->rows; ++row) {
-        for (ulong col = 0; col < leftMat->cols; ++col) {
+    for (int row = 0; row < leftMat->rows; ++row) {
+        for (int col = 0; col < leftMat->cols; ++col) {
             elem_at(leftMat, row, col) += elem_at(rightMat, row, col);
         }
     }
@@ -64,8 +64,8 @@ int matrix_subtract(Matrix *leftMat, Matrix *rightMat) {
         return -1;
     }
 
-    for (ulong row = 0; row < leftMat->rows; ++row) {
-        for (ulong col = 0; col < leftMat->cols; ++col) {
+    for (int row = 0; row < leftMat->rows; ++row) {
+        for (int col = 0; col < leftMat->cols; ++col) {
             elem_at(leftMat, row, col) -= elem_at(rightMat, row, col);
         }
     }
@@ -74,8 +74,8 @@ int matrix_subtract(Matrix *leftMat, Matrix *rightMat) {
 }
 
 int matrix_mult_by(Matrix *mat, double val) {
-    for (ulong row = 0; row < mat->rows; ++row) {
-        for (ulong col = 0; col < mat->cols; ++col) {
+    for (int row = 0; row < mat->rows; ++row) {
+        for (int col = 0; col < mat->cols; ++col) {
             elem_at(mat, row, col) *= val;
         }
     }
@@ -83,8 +83,8 @@ int matrix_mult_by(Matrix *mat, double val) {
 }
 
 int matrix_fill_with(Matrix *mat, double val) {
-    for (ulong row = 0; row < mat->rows; ++row) {
-        for (ulong col = 0; col < mat->cols; ++col) {
+    for (int row = 0; row < mat->rows; ++row) {
+        for (int col = 0; col < mat->cols; ++col) {
             elem_at(mat, row, col) = val;
         }
     }
@@ -98,8 +98,8 @@ int matrix_inner_product(Matrix *mat1, Matrix *mat2, double *result) {
     }
 
     *result = 0.0;
-    for (ulong row = 0; row < mat1->rows; ++row) {
-        for (ulong col = 0; col < mat1->cols; ++col) {
+    for (int row = 0; row < mat1->rows; ++row) {
+        for (int col = 0; col < mat1->cols; ++col) {
             *result += elem_at(mat1, row, col) * elem_at(mat2, row, col);
         }
     }

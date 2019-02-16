@@ -3,6 +3,6 @@
 
 void free_resources(void);
 
-void add_resource(void *res, void (*handler)(void*));
+int add_resource(void *resource, void (*handler)(void*));
 
 #endif // ERRHANDLE_H
