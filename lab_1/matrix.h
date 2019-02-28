@@ -22,6 +22,9 @@ int matrix_add(Matrix *leftMat, Matrix *rightMat);
 
 int matrix_mult_by(Matrix *mat, double val);
 
+int matrix_partial_mult(Matrix *leftMat, Matrix *rightMat, Matrix *resMat,
+                        int subRows, int subCols, int rowOffset, int colOffset);
+
 int matrix_fill_with(Matrix *mat, double val);
 
 int matrix_inner_product(Matrix *mat1, Matrix *mat2, double *result);

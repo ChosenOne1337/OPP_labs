@@ -6,11 +6,11 @@
 
 static void **resources = NULL;
 static void (**handlers)(void*) = NULL;
-static ulong resNumber = 0;
-static ulong resCapacity = 0;
+static unsigned long resNumber = 0;
+static unsigned long resCapacity = 0;
 
 static int increase_capacity() {
-    ulong newCapacity = 0;
+    unsigned long newCapacity = 0;
     if (resCapacity == 0) {
         newCapacity = DEFAULT_CAPACITY;
     } else {
@@ -34,7 +34,7 @@ static int increase_capacity() {
 }
 
 void free_resources(void) {
-    for (ulong resIndex = 0; resIndex < resNumber; ++resIndex) {
+    for (unsigned long resIndex = 0; resIndex < resNumber; ++resIndex) {
         handlers[resIndex](resources[resIndex]);
     }
     free(resources);
