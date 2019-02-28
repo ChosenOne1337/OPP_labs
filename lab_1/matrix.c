@@ -93,8 +93,8 @@ int matrix_partial_mult(Matrix *leftMat, Matrix *rightMat, Matrix *resMat,
         for (int col = 0; col < resMat->cols; ++col) {
             elem_at(resMat, row, col) = 0.0;
             for (int j = 0; j < subCols; ++j) {
-                print_debug(leftMat->rows, leftMat->cols, subRows, subCols, rowOffset, colOffset,
-                            rightMat->rows, rightMat->cols, rowOffset + row, colOffset + j, j, col);
+//                print_debug(leftMat->rows, leftMat->cols, subRows, subCols, rowOffset, colOffset,
+//                            rightMat->rows, rightMat->cols, rowOffset + row, colOffset + j, j, col);
                 elem_at(resMat, row, col) +=
                         elem_at(leftMat, rowOffset + row, colOffset + j) * elem_at(rightMat, j, col);
             }
