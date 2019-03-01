@@ -29,4 +29,6 @@ int matrix_fill_with(Matrix *mat, double val);
 
 int matrix_inner_product(Matrix *mat1, Matrix *mat2, double *result);
 
+double get_norm_2(Matrix *mat);
+
 #endif // MATRIX_H

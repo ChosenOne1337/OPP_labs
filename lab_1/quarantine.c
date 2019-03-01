@@ -10,115 +10,18 @@
 #include "matrix.h"
 #include "errhandle.h"
 
-#define EPS (1e-9)
-#define TAU (1e-5)
+#define EPS (1e-13)
 
-void matrix_destroy_wrapper(void *mat) {
-    matrix_destroy((Matrix*)mat);
-}
-
-void assert_with_resources(int condition, char *errorMsg) {
-    if (!(condition)) {
-        fprintf(stderr, "%s\n", errorMsg);
-        free_resources();
-        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
-    }
-}
-
-void init_matrix_A(Matrix *matA) {
-    matrix_fill_with(matA, 1.0);
-    for (int ix = 0; ix < matA->rows; ++ix) {
-        elem_at(matA, ix, ix) = 2.0;
-    }
-}
-
-void init_vector_B(Matrix *matA, Matrix *vecB, Matrix *vecU) {
-    for (int i = 0; i < vecU->rows; ++i) {
-        elem_at(vecU, i, 0) = 1.0;
-        elem_at(vecB, i, 0) = vecB->rows + 1;
-    }
-}
-
-int get_chunk_size(int chunkIndex, int chunksNumber, int sequenceSize) {
-    // the remainder is uniformly distributed in chunks
-    int chunkSize = sequenceSize / chunksNumber;
-    int remainder = sequenceSize % chunksNumber;
-    return chunkSize + (chunkIndex < remainder ? 1 : 0);
-}
-
-int get_chunk_offset(int chunkIndex, int chunksNumber, int sequenceSize) {
-    int chunkSize = sequenceSize / chunksNumber;
-    int remainder = sequenceSize % chunksNumber;
-    return chunkIndex * chunkSize + (chunkIndex < remainder ? chunkIndex : remainder);
-}
-
+void matrix_destroy_wrapper(void *mat);
+void assert_with_resources(int condition, char *errorMsg);
+void init_matrix_A(Matrix *matA);
+void init_vector_B(Matrix *matA, Matrix *vecB, Matrix *vecU);
+int get_chunk_size(int chunkIndex, int chunksNumber, int sequenceSize);
+int get_chunk_offset(int chunkIndex, int chunksNumber, int sequenceSize);
 void ring_multiplication(Matrix *matChunk, Matrix *vecChunk, Matrix *vecResChunk, Matrix *vecTempChunk,
-                         int *vecChunkOffsets, int *vecChunkSizes, int procRank, int procNum) {
-    int biggestChunkSize = vecChunkSizes[0];
-    // set vecResChunk to zero
-    memset(vecResChunk->data, 0, vecResChunk->rows * sizeof(double));
-    // calculate parts of A * vec
-    for (int i = 0, chunkIx = procRank; i < procNum; ++i) {
-        MPI_Sendrecv_replace(vecChunk->data, biggestChunkSize, MPI_DOUBLE, (procRank + 1) % procNum, 1,
-                             (procRank + procNum - 1) % procNum, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        chunkIx = (chunkIx + procNum - 1) % procNum;
-        vecChunk->rows = vecChunkSizes[chunkIx];
-        matrix_partial_mult(matChunk, vecChunk, vecTempChunk,
-                            matChunk->rows, vecChunk->rows, 0, vecChunkOffsets[chunkIx]);
-        matrix_add(vecResChunk, vecTempChunk);
-    }
-}
+                         int *vecChunkOffsets, int *vecChunkSizes, int procRank, int procNum);
 
-void calc_no_MPI(int N) {
-    Matrix *matA = matrix_create(N, N);
-    Matrix *vecB = matrix_create(N, 1);
-    Matrix *vecX = matrix_create(N, 1);
-    Matrix *vecY = matrix_create(N, 1);
-    Matrix *vecU = matrix_create(N, 1);
-
-    double eps = 0.0;
-    double vecBnorm = 0.0;
-
-    add_resource(matA, matrix_destroy_wrapper);
-    add_resource(vecB, matrix_destroy_wrapper);
-    add_resource(vecX, matrix_destroy_wrapper);
-    add_resource(vecY, matrix_destroy_wrapper);
-    add_resource(vecU, matrix_destroy_wrapper);
-
-    if (!(matA && vecB && vecX && vecY && vecU)) {
-        fprintf(stderr, "Failed to allocate necessary resources\n");
-        free_resources();
-        return;
-    }
-
-    init_matrix_A(matA);
-    init_vector_B(matA, vecB, vecU);
-
-    time_t beg = clock();
-
-    vecBnorm = get_norm_2(vecB);
-    matrix_subtract(vecY, vecB);
-    do {
-        // x = x - tau * y
-        matrix_mult_by(vecY, TAU);
-        matrix_subtract(vecX, vecY);
-        // eps = ||Ax - b|| / ||b||
-        matrix_mult(matA, vecX, vecY);
-        matrix_subtract(vecY, vecB);
-        eps = get_norm_2(vecY) / vecBnorm;
-    } while (eps >= EPS);
-
-    time_t end = clock();
-
-    matrix_subtract(vecX, vecU);
-    double vecDist = get_norm_2(vecX);
-    printf("||x - u|| == %.g\n", vecDist);
-    printf("Elapsed time: %.3fs\n", (double)(end - beg) / CLOCKS_PER_SEC);
-
-    free_resources();
-}
-
-void calculate(int variant, int N) {
+static void calculate(int variant, int N) {
     int procRank = 0, procNum = 0;
     MPI_Init(NULL, NULL);
     MPI_Comm_size(MPI_COMM_WORLD, &procNum);
@@ -139,15 +42,17 @@ void calculate(int variant, int N) {
     Matrix *vecXchunk = matrix_create(biggestChunkSize, 1);
     Matrix *vecYchunk = matrix_create(biggestChunkSize, 1);
     Matrix *vecTchunk = matrix_create(localVecChunkSize, 1);
+    Matrix *vecVchunk = matrix_create(localVecChunkSize, 1);
 
     Matrix *matA = NULL;
     Matrix *vecB = NULL;
     Matrix *vecU = NULL;
-    Matrix *vecX = (variant == 1 || procRank == 0) ? matrix_create(N, 1) : NULL;
+    Matrix *vecX = variant == 1 ? matrix_create(N, 1) : NULL;
     Matrix *vecY = variant == 1 ? matrix_create(N, 1) : NULL;
 
     double vecBnorm = 0.0;
     double eps = 0.0, localEpsNumerator = 0.0, epsNumerator = 0.0;
+    double tau = 0.0, localTauParts[2], tauParts[2];
 
     // add resources for deallocation and check for equality to NULL
 
@@ -160,17 +65,13 @@ void calculate(int variant, int N) {
     add_resource(vecXchunk, matrix_destroy_wrapper);
     add_resource(vecYchunk, matrix_destroy_wrapper);
     add_resource(vecTchunk, matrix_destroy_wrapper);
+    add_resource(vecVchunk, matrix_destroy_wrapper);
     add_resource(matA, matrix_destroy_wrapper);
     add_resource(vecB, matrix_destroy_wrapper);
     add_resource(vecU, matrix_destroy_wrapper);
     add_resource(vecX, matrix_destroy_wrapper);
     add_resource(vecY, matrix_destroy_wrapper);
 
-    if (procRank == 0) {
-        assert_with_resources(vecX != NULL, "Failed to allocate necessary resources");
-    } else if (variant == 1) {
-        assert_with_resources(vecX && vecY, "Failed to allocate necessary resources");
-    }
     assert_with_resources(vecChunkSizes && vecChunkOffsets && matChunkSizes && matChunkOffsets &&
                         matAchunk && vecBchunk && vecXchunk && vecYchunk && vecTchunk,
                         "Failed to allocate necessary resources");
@@ -194,6 +95,7 @@ void calculate(int variant, int N) {
         vecB = matrix_create(N, 1);
         vecU = matrix_create(N, 1);
         // create vector X for result validation
+        vecX = matrix_create(N, 1);
         assert_with_resources(matA && vecB && vecU, "Failed to allocate necessary resources");
         // initialize vector B, U
         init_matrix_A(matA);
@@ -223,15 +125,33 @@ void calculate(int variant, int N) {
             MPI_Allgatherv(vecYchunk->data, localVecChunkSize, MPI_DOUBLE,
                                    vecY->data, vecChunkSizes, vecChunkOffsets, MPI_DOUBLE, MPI_COMM_WORLD);
         }
-                /* x_n+1 = x_n - tau * y_n */
+                /* tau_n = (y_n, A * y_n) / (A * y_n, A * y_n) */
 
-        matrix_mult_by(vecYchunk, TAU);
+        // get parts of v = A * y_n
+        if (variant == 1) {
+            matrix_mult(matAchunk, vecY, vecVchunk);
+        }
+        else {
+            ring_multiplication(matAchunk, vecYchunk, vecVchunk, vecTchunk,
+                            vecChunkOffsets, vecChunkSizes, procRank, procNum);
+        }
+        // get numerator and denominator of tau_n
+        matrix_inner_product(vecYchunk, vecVchunk, &localTauParts[0]);
+        matrix_inner_product(vecVchunk, vecVchunk, &localTauParts[1]);
+        MPI_Allreduce(&localTauParts, &tauParts, 2, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        // calculate tau_n
+        tau = tauParts[0] / tauParts[1];
+
+                /* x_n+1 = x_n - tau_n * y_n */
+
+        matrix_mult_by(vecYchunk, tau);
         matrix_subtract(vecXchunk, vecYchunk);
         if (variant == 1) {
             // assemble the vector X
             MPI_Allgatherv(vecXchunk->data, localVecChunkSize, MPI_DOUBLE,
                                 vecX->data, vecChunkSizes, vecChunkOffsets, MPI_DOUBLE, MPI_COMM_WORLD);
         }
+
                /*
                 * eps = ||A * x_n - b|| / ||b||;
                 * y_n = A * x_n - b
@@ -254,6 +174,9 @@ void calculate(int variant, int N) {
         // calculate eps
         eps = sqrt(epsNumerator) / vecBnorm;
 
+        if (procRank == 0) {
+            printf("%lu) eps == %g\n", iterNum, eps);
+        }
         ++iterNum;
     } while (eps > EPS);
 
@@ -279,34 +202,4 @@ void calculate(int variant, int N) {
 
     free_resources();
     MPI_Finalize();
-}
-
-void print_usage(char *progName) {
-    fprintf(stderr, "Usage: %s <program variant (1, 2)> <matrix size>\n", basename(progName));
-}
-
-int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        print_usage(argv[0]);
-        return EXIT_FAILURE;
-    }
-
-    char *ptr = NULL;
-    long progNum = strtol(argv[1], &ptr, 10);
-    if (*ptr || (progNum != 1 && progNum != 2)) {
-        print_usage(argv[0]);
-        return EXIT_FAILURE;
-    }
-    long matSize = strtol(argv[2], &ptr, 10);
-    if (*ptr) {
-        print_usage(argv[0]);
-        return EXIT_FAILURE;
-    }
-    if (matSize > INT_MAX || errno == ERANGE) {
-        fprintf(stderr, "Too big size of the matrix (maximum is %d)\n", INT_MAX);
-    }
-
-    calculate((int)progNum, (int)matSize);
-
-    return EXIT_SUCCESS;
 }
