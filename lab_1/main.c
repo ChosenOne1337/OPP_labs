@@ -218,11 +218,6 @@ void calculate(int variant, int N) {
     // in the beginning, x_n == 0 => y_n = A * x_n - b = -b
     matrix_subtract(vecYchunk, vecBchunk);
     do {
-        if (variant == 1) {
-            // assemble the vector Y
-            MPI_Allgatherv(vecYchunk->data, localVecChunkSize, MPI_DOUBLE,
-                                   vecY->data, vecChunkSizes, vecChunkOffsets, MPI_DOUBLE, MPI_COMM_WORLD);
-        }
                 /* x_n+1 = x_n - tau * y_n */
 
         matrix_mult_by(vecYchunk, TAU);
