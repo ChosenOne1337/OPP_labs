@@ -65,6 +65,7 @@ void work1(int N) {
 
     double beg = omp_get_wtime();
 
+    unsigned long iter = 0;
     vecBnorm = get_norm_2(vecB);
     matrix_subtract(vecY, vecB);
     do {
@@ -75,6 +76,7 @@ void work1(int N) {
         matrix_mult(matA, vecX, vecY);
         matrix_subtract(vecY, vecB);
         eps = get_norm_2(vecY) / vecBnorm;
+        ++iter;
     } while (eps >= EPS);
 
     double end = omp_get_wtime();
@@ -83,6 +85,7 @@ void work1(int N) {
     double vecDist = get_norm_2(vecX);
     printf("||x - u|| == %.g\n", vecDist);
     printf("Elapsed time: %.3fs\n", end - beg);
+    printf("Number of iterations: %lu\n", iter);
 
     free_resources();
 }
@@ -107,8 +110,10 @@ void work2(int N) {
 
     double beg = omp_get_wtime();
 
+    unsigned long iter = 0;
     #pragma omp parallel
     {
+        unsigned long localIter = 0;
         double eps = 0.0;
         double vecBnorm = parallel_get_norm_2(vecB);
         parallel_matrix_subtract(vecY, vecB);
@@ -120,15 +125,18 @@ void work2(int N) {
             parallel_matrix_mult(matA, vecX, vecY);
             parallel_matrix_subtract(vecY, vecB);
             eps = parallel_get_norm_2(vecY) / vecBnorm;
+            ++localIter;
         } while (eps >= EPS);
+        #pragma omp single
+        iter = localIter;
     }
 
     double end = omp_get_wtime();
-
     matrix_subtract(vecX, vecU);
     double vecDist = get_norm_2(vecX);
     printf("||x - u|| == %.g\n", vecDist);
     printf("Elapsed time: %.3fs\n", end - beg);
+    printf("Number of iterations: %lu\n", iter);
 
     free_resources();
 }
