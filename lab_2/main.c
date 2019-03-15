@@ -42,20 +42,7 @@ void init_vector_B(Matrix *vecB, Matrix *vecU) {
     }
 }
 
-int get_chunk_size(int chunkIndex, int chunksNumber, int sequenceSize) {
-    // the remainder is uniformly distributed in chunks
-    int chunkSize = sequenceSize / chunksNumber;
-    int remainder = sequenceSize % chunksNumber;
-    return chunkSize + (chunkIndex < remainder ? 1 : 0);
-}
-
-int get_chunk_offset(int chunkIndex, int chunksNumber, int sequenceSize) {
-    int chunkSize = sequenceSize / chunksNumber;
-    int remainder = sequenceSize % chunksNumber;
-    return chunkIndex * chunkSize + (chunkIndex < remainder ? chunkIndex : remainder);
-}
-
-void work1(int N, int numThreads) {
+void work1(int N) {
     Matrix *matA = matrix_create(N, N);
     Matrix *vecB = matrix_create(N, 1);
     Matrix *vecX = matrix_create(N, 1);
@@ -100,7 +87,7 @@ void work1(int N, int numThreads) {
     free_resources();
 }
 
-void work2(int N, int numThreads) {
+void work2(int N) {
     Matrix *matA = matrix_create(N, N);
     Matrix *vecB = matrix_create(N, 1);
     Matrix *vecX = matrix_create(N, 1);
@@ -214,9 +201,9 @@ int main(int argc, char *argv[]) {
 
     omp_set_num_threads(numThreads);
     if (variant == 1) {
-        work1(matrixSize, numThreads);
+        work1(matrixSize);
     } else {
-        work2(matrixSize, numThreads);
+        work2(matrixSize);
     }
 
     return EXIT_SUCCESS;
