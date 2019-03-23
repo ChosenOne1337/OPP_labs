@@ -33,6 +33,12 @@ static int is_whitespace_string(char *str) {
 }
 
 
+void swap_ints(int *a, int *b) {
+    int t = *a;
+    *a = *b;
+    *b = t;
+}
+
 int parse_long(long *val, char *line) {
     int base = 10;
     char *lineTail = line;

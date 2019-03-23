@@ -5,6 +5,7 @@
 #define FAILURE_CODE (1)
 
 int parse_long(long *val, char *line);
+void swap_ints(int *a, int *b);
 
 int get_chunk_size(int chunkIndex, int chunksNumber, int sequenceSize);
 int get_chunk_offset(int chunkIndex, int chunksNumber, int sequenceSize);

@@ -50,7 +50,22 @@ int matrix_mult(Matrix *leftMat, Matrix *rightMat, Matrix *resMat) {
 }
 
 int matrix_transpose(Matrix *mat) {
-
+    Matrix *newMat = matrix_create(mat->cols, mat->rows);
+    if (newMat == NULL) {
+        return -1;
+    }
+    for (int row = 0; row < mat->rows; ++row) {
+        for (int col = 0; col < mat->cols; ++col) {
+            elem_at(newMat, col, row) = elem_at(mat, row, col);
+        }
+    }
+    mat->rows = newMat->rows;
+    mat->cols = newMat->cols;
+    double *temp = newMat->data;
+    newMat->data = mat->data;
+    mat->data = temp;
+    matrix_destroy(newMat);
+    return 0;
 }
 
 int matrix_partial_mult(Matrix *leftMat, Matrix *rightMat, Matrix *resMat,
