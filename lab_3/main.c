@@ -66,7 +66,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Parameters can't be > %d\n", INT_MAX);
     }
     if (N1 < P1 || N2 < P2) {
-        fprintf(stderr, "Invalid sizes of matrices parts");
+        fprintf(stderr, "Invalid sizes of matrices parts\n");
         return EXIT_FAILURE;
     }
     calculate((int)N1, (int)N2, (int)N3, (int)P1, (int)P2);
@@ -138,8 +138,6 @@ void calculate(int matArows, int matAcols, int matBcols, int gridRows, int gridC
 
         matrix_randomize(matA, 1.0);
         matrix_randomize(matB, 1.0);
-        print_mat(matA);
-        print_mat(matB);
     }
     // create submatrices of A, B, C in all processes
     int submatAcols = matAcols;
@@ -185,6 +183,8 @@ void calculate(int matArows, int matAcols, int matBcols, int gridRows, int gridC
                     + get_chunk_offset(row, gridRows, matArows) * matBcols;
         }
     }
+
+    double beg = MPI_Wtime();
     // scatter matrix A within the first column
     if (coords[CoordY] == 0) {
         MPI_Barrier(colComm);
@@ -208,16 +208,38 @@ void calculate(int matArows, int matAcols, int matBcols, int gridRows, int gridC
     MPI_Bcast(submatB->data, submatB->rows * submatB->cols, MPI_DOUBLE, rootColRank, colComm);
     // multiplicate submatrices
     matrix_mult(submatA, submatB, submatC);
-    // assemble result in the main process
-    int iterNum = get_chunk_size(0, gridRows, matArows);
-    for (int iter = 0; iter < iterNum; ++iter) {
-        MPI_Gatherv(submatC->data + iter * submatC->cols, submatC->cols, MPI_DOUBLE,
-                    (gridRank == rootGridRank) ? matC->data + iter * matC->cols: NULL,
+    // gather a part of result in the main process
+    int linesToSend = get_chunk_size(gridRows - 1, gridRows, matArows);
+    for (int i = 0; i < linesToSend; ++i) {
+        MPI_Gatherv(submatC->data + i * submatC->cols, submatC->cols, MPI_DOUBLE,
+                    (gridRank == rootGridRank) ? matC->data + i * matC->cols: NULL,
                     matCchunkSizes, matCchunkOffsets, MPI_DOUBLE, rootGridRank, gridComm);
     }
+    // check whether the matrix C was fully assembled; if not - gather the remaining lines
+    if (matArows % gridRows != 0) {
+        // create 2 subcommunicators: the processes which have one more line to send and those which don't
+        MPI_Comm subComm;
+        int hasLinesToSend = (submatC->rows == linesToSend) ? FALSE : TRUE;
+        MPI_Comm_split(gridComm, hasLinesToSend, gridRank, &subComm);
+        // set cartesian topology in these subcommunicators
+        MPI_Comm subgridComm;
+        dims[ROWS_DIM] = hasLinesToSend ? (matArows % gridRows) : (gridRows - matArows % gridRows);
+        dims[COLS_DIM] = gridCols;
+        reorder = FALSE;
+        MPI_Cart_create(subComm, NDIMS, dims, periods, reorder, &subgridComm);
+        // gather the remainder of the matrix C
+        if (hasLinesToSend) {
+            MPI_Gatherv(submatC->data + linesToSend * submatC->cols, submatC->cols, MPI_DOUBLE,
+                        (gridRank == rootGridRank) ? matC->data + linesToSend * matC->cols: NULL,
+                        matCchunkSizes, matCchunkOffsets, MPI_DOUBLE, rootGridRank, subgridComm);
+        }
+        MPI_Comm_free(&subComm);
+        MPI_Comm_free(&subgridComm);
+    }
 
+    double end = MPI_Wtime();
     if (gridRank == rootGridRank) {
-        print_mat(matC);
+        printf("Elapsed time: %.3fs\n", end - beg);
     }
 
     free_resources();
