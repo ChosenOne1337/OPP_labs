@@ -9,27 +9,17 @@
 #include <mpich/mpi.h>
 #include "matrix.h"
 #include "utils.h"
-#include "errhandle.h"
 
-void matrix_destroy_wrapper(void *mat) {
-    matrix_destroy((Matrix*)mat);
-}
+#define NDIMS (2)
+#define TRUE (1)
+#define FALSE (0)
+#define ROWS_DIM (0)
+#define COLS_DIM (1)
 
-void mpi_comm_free_wrapper(void *comm) {
-    MPI_Comm_free((MPI_Comm*)comm);
-}
-
-void assert_with_resources(int condition, char *errorMsg) {
-    if (!(condition)) {
-        fprintf(stderr, "%s\n", errorMsg);
-        free_resources();
-        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
-    }
-}
-
-void print_usage(char *progName) {
-    fprintf(stderr, "Usage: %s N1 N2 N3 P1 P2\n", basename(progName));
-}
+typedef enum Dimension {
+    RowDim = 0,
+    ColDim = 1
+} Coord;
 
 typedef enum Args {
     N1_arg = 1,
@@ -40,7 +30,229 @@ typedef enum Args {
     TotalArgs
 } Args;
 
-void calculate(int N1, int N2, int N3, int P1, int P2);
+typedef struct TaskParams {
+    int matArows;
+    int matAcols;
+    int matBrows;
+    int matBcols;
+    int gridRows;
+    int gridCols;
+} TaskParams;
+
+static int gridRank;
+static int rootRank = 0;
+static int coords[NDIMS];
+static MPI_Datatype submatType;
+static MPI_Datatype stripType;
+static MPI_Comm gridComm, rowComm, colComm;
+
+int create_matrices(Matrix **matA, Matrix **matB, Matrix **matC,
+                        Matrix **submatA, Matrix **submatB, Matrix **submatC,
+                            TaskParams *params) {
+    if (gridRank == rootRank) {
+        *matA = matrix_create(params->matArows, params->matAcols);
+        *matB = matrix_create(params->matBrows, params->matBcols);
+        *matC = matrix_create(params->matArows, params->matBcols);
+        if (!*matA || !*matB || !*matC) {
+            matrix_destroy(*matA);
+            matrix_destroy(*matB);
+            matrix_destroy(*matC);
+            return FAILURE_CODE;
+        }
+    }
+    int submatAcols = params->matAcols;
+    int submatArows = get_chunk_size(coords[RowDim], params->gridRows, params->matArows);
+    int submatBcols = get_chunk_size(coords[ColDim], params->gridCols, params->matBcols);
+    *submatA = matrix_create(submatArows, submatAcols);
+    *submatB = matrix_create(submatAcols, submatBcols);
+    *submatC = matrix_create(submatArows, submatBcols);
+
+    if (*submatA && *submatB && *submatC) {
+        return SUCCESS_CODE;
+    }
+    matrix_destroy(*submatA);
+    matrix_destroy(*submatB);
+    matrix_destroy(*submatC);
+
+    return FAILURE_CODE;
+}
+
+void free_matrices(Matrix *matA, Matrix *matB, Matrix *matC,
+                    Matrix *submatA, Matrix *submatB, Matrix *submatC) {
+    matrix_destroy(matA);
+    matrix_destroy(matB);
+    matrix_destroy(matC);
+    matrix_destroy(submatA);
+    matrix_destroy(submatB);
+    matrix_destroy(submatC);
+}
+
+void initialize_matrices(Matrix *matA, Matrix *matB) {
+    if (gridRank == rootRank) {
+        double amp = 1.0;
+        matrix_randomize(matA, amp);
+        matrix_randomize(matB, amp);
+    }
+}
+
+void create_grid_communicators(TaskParams *params) {
+    int dims[NDIMS] = {params->gridRows, params->gridCols};
+    int periods[NDIMS] = {0, 0};
+    int reorder = TRUE;
+    // create process grid
+    MPI_Cart_create(MPI_COMM_WORLD, NDIMS, dims, periods, reorder, &gridComm);
+    // get rank of the process in the grid communicator
+    MPI_Comm_rank(gridComm, &gridRank);
+    // get process coordinates
+    MPI_Cart_coords(gridComm, gridRank, NDIMS, coords);
+    // get rows and cols communicators in the grid
+    int remainDims[NDIMS];
+    remainDims[RowDim] = TRUE; remainDims[ColDim] = FALSE;
+    MPI_Cart_sub(gridComm, remainDims, &rowComm);
+    remainDims[RowDim] = FALSE; remainDims[ColDim] = TRUE;
+    MPI_Cart_sub(gridComm, remainDims, &colComm);
+}
+
+void free_grid_communicators(void) {
+    MPI_Comm_free(&gridComm);
+    MPI_Comm_free(&rowComm);
+    MPI_Comm_free(&colComm);
+}
+
+void create_mpi_datatypes(TaskParams *params) {
+    // vertical strips of matrix B
+    int numberOfBlocks = params->matBrows;
+    int blockLength = params->matBcols / params->gridCols;
+    int stride = params->matBcols;
+    MPI_Type_vector(numberOfBlocks, blockLength, stride, MPI_DOUBLE, &stripType);
+    MPI_Type_commit(&stripType);
+    // submatrices of matrix C
+    numberOfBlocks = params->matArows / params->gridRows;
+    blockLength = params->matBcols / params->gridCols;
+    stride = params->matBcols;
+    MPI_Type_vector(numberOfBlocks, blockLength, stride, MPI_DOUBLE, &submatType);
+    MPI_Type_commit(&submatType);
+}
+
+void free_mpi_datatypes(void) {
+    MPI_Type_free(&stripType);
+    MPI_Type_free(&submatType);
+}
+
+void distribute_matrices(Matrix *matA, Matrix *matB, Matrix *submatA, Matrix *submatB, TaskParams *params) {
+    // scatter matrix A
+    if (coords[ColDim] == 0) {
+        MPI_Scatter(gridRank == rootRank ? matA->data : NULL, submatA->rows * submatA->cols, MPI_DOUBLE,
+                    submatA->data, submatA->rows * submatA->cols, MPI_DOUBLE, rootRank, colComm);
+    }
+
+    // scatter matrix B
+    if (coords[RowDim] == 0) {
+        int *sendCounts = NULL, *sendDispls = NULL;
+        if (gridRank == rootRank) {
+            sendCounts = (int*)calloc((size_t)params->gridCols, sizeof(int));
+            sendDispls = (int*)calloc((size_t)params->gridCols, sizeof(int));
+            for (int stripIndex = 0; stripIndex < params->gridCols; ++stripIndex) {
+                sendCounts[stripIndex] = 1;
+                sendDispls[stripIndex] = get_chunk_offset(stripIndex, params->gridCols, params->matBcols);
+            }
+        }
+
+        MPI_Scatterv(gridRank == rootRank ? matB->data : NULL, sendCounts, sendDispls, stripType,
+                     submatB->data, submatB->rows * submatB->cols, MPI_DOUBLE, rootRank, rowComm);
+
+        free(sendCounts);
+        free(sendDispls);
+    }
+
+    // broadcast matrices A and B
+    MPI_Bcast(submatA->data, submatA->rows * submatA->cols, MPI_DOUBLE, rootRank, rowComm);
+    MPI_Bcast(submatB->data, submatB->rows * submatB->cols, MPI_DOUBLE, rootRank, colComm);
+}
+
+void assemble_result(Matrix *matC, Matrix *submatC, TaskParams *params) {
+    int procNum = params->gridRows * params->gridCols;
+    int *recvCounts = NULL, *recvDispls = NULL;
+
+    if (gridRank == rootRank) {
+        recvCounts = (int*)calloc((size_t)procNum, sizeof(int));
+        recvDispls = (int*)calloc((size_t)procNum, sizeof(int));
+        for (int row = 0; row < params->gridRows; ++row) {
+            for (int col = 0; col < params->gridCols; ++col) {
+                recvCounts[row * params->gridCols + col] = 1;
+                recvDispls[row * params->gridCols + col] = get_chunk_offset(col, params->gridCols, matC->cols)
+                        + get_chunk_offset(row, params->gridRows, matC->rows) * matC->cols;
+            }
+        }
+    }
+
+    MPI_Gatherv(submatC->data, submatC->rows * submatC->cols, MPI_DOUBLE,
+                gridRank == rootRank ? matC->data : NULL, recvCounts, recvDispls, submatType, rootRank, gridComm);
+
+    free(recvCounts);
+    free(recvDispls);
+}
+
+int check_result(Matrix *matA, Matrix *matB, Matrix *matC) {
+    Matrix *matT = matrix_create(matC->rows, matC->cols);
+    if (matT == NULL) {
+        fprintf(stderr, "check_result() error: failed to allocate memory");
+        return FALSE;
+    }
+    matrix_mult(matA, matB, matT);
+    for (int r = 0; r < matC->rows; ++r) {
+        for (int c = 0; c < matC->cols; ++c) {
+            if (elem_at(matC, r, c) != elem_at(matT, r, c)) {
+                return FALSE;
+            }
+        }
+    }
+    matrix_destroy(matT);
+    return TRUE;
+}
+
+void print_mat(Matrix *mat) {
+    for (int r = 0; r < mat->rows; ++r) {
+        for (int c = 0; c < mat->cols; ++c) {
+            printf("%+.3f\t", elem_at(mat, r, c));
+        }
+        printf("\n");
+    }
+    printf("\n");
+}
+
+void calculate(TaskParams *params) {
+    Matrix *matA = NULL, *matB = NULL, *matC = NULL;
+    Matrix *submatA = NULL, *submatB = NULL, *submatC = NULL;
+
+    create_grid_communicators(params);
+    create_mpi_datatypes(params);
+    int returnCode = create_matrices(&matA, &matB, &matC, &submatA, &submatB, &submatC, params);
+    if (returnCode == FAILURE_CODE) {
+        fprintf(stderr, "Process (%d, %d): insufficient memory\n", coords[RowDim], coords[ColDim]);
+        MPI_Abort(MPI_COMM_WORLD, FAILURE_CODE);
+    }
+    initialize_matrices(matA, matB);
+
+    double beg = MPI_Wtime();
+    distribute_matrices(matA, matB, submatA, submatB, params);
+    matrix_mult(submatA, submatB, submatC);
+    assemble_result(matC, submatC, params);
+    double end = MPI_Wtime();
+
+    int resultIsValid = check_result(matA, matB, matC);
+    printf("Result is %s!\n"
+           "Elapsed time: %g\n",
+           resultIsValid ? "valid" : "invalid", end - beg);
+
+    free_mpi_datatypes();
+    free_grid_communicators();
+    free_matrices(matA, matB, matC, submatA, submatB, submatC);
+}
+
+void print_usage(char *progName) {
+    fprintf(stderr, "Usage: %s N1 N2 N3 P1 P2\n", basename(progName));
+}
 
 int main(int argc, char *argv[]) {
     if (argc != TotalArgs) {
@@ -65,183 +277,27 @@ int main(int argc, char *argv[]) {
     if (N1 > INT_MAX || N2 > INT_MAX || N3 > INT_MAX || P1 > INT_MAX || P2 > INT_MAX) {
         fprintf(stderr, "Parameters can't be > %d\n", INT_MAX);
     }
-    if (N1 < P1 || N2 < P2) {
+    if (N1 < P1 || N3 < P2) {
         fprintf(stderr, "Invalid sizes of matrices parts\n");
         return EXIT_FAILURE;
     }
-    calculate((int)N1, (int)N2, (int)N3, (int)P1, (int)P2);
 
-    return EXIT_SUCCESS;
-}
-
-#define NDIMS (2)
-#define TRUE (1)
-#define FALSE (0)
-#define ROWS_DIM (0)
-#define COLS_DIM (1)
-
-typedef enum Coord {
-    CoordX = 0,
-    CoordY = 1
-} Coord;
-
-void print_mat(Matrix *mat) {
-    for (int r = 0; r < mat->rows; ++r) {
-        for (int c = 0; c < mat->cols; ++c) {
-            printf("%+.3f\t", elem_at(mat, r, c));
-        }
-        printf("\n");
-    }
-    printf("\n");
-}
-
-void calculate(int matArows, int matAcols, int matBcols, int gridRows, int gridCols) {
     MPI_Init(NULL, NULL);
     int procNum = 0;
     MPI_Comm_size(MPI_COMM_WORLD, &procNum);
-    if (procNum != gridRows * gridCols) {
-        fprintf(stderr, "gridRows * gridCols has to be equal to the number of processes\n");
-        return;
+    if (procNum != P1 * P2) {
+        fprintf(stderr, "Number of nodes in the grid has to be equal to the number of MPI processes\n");
+    } else if (N1 % P1 != 0) {
+        fprintf(stderr, "Number of rows in the matrix A has to be divisible by the number of rows in the grid\n");
+    } else if (N3 % P2 != 0) {
+        fprintf(stderr, "Number of cols in the matrix B has to be divisible by the number of cols in the grid\n");
+    } else {
+        TaskParams params = {.matArows = (int)N1, .matAcols = (int)N2,
+                             .matBrows = (int)N2, .matBcols = (int)N3,
+                             .gridRows = (int)P1, .gridCols = (int)P2};
+        calculate(&params);
     }
-
-    // create 2D grid communicator
-    MPI_Comm gridComm;
-    int dims[NDIMS] = {gridRows, gridCols}, periods[NDIMS] = {FALSE, FALSE}, reorder = TRUE;
-    MPI_Cart_create(MPI_COMM_WORLD, NDIMS, dims, periods, reorder, &gridComm);
-    // get 2d coordinates of the process in the grid
-    int coords[NDIMS] = {0, 0};
-    MPI_Cart_get(gridComm, NDIMS, dims, periods, coords);
-    // get process rank in the grid
-    int gridRank = 0;
-    int rootGridRank = 0;
-    MPI_Comm_rank(gridComm, &gridRank);
-    // split grid into rows and cols
-    MPI_Comm rowComm, colComm;
-    MPI_Comm_split(gridComm, coords[CoordX], coords[CoordY], &rowComm);
-    MPI_Comm_split(gridComm, coords[CoordY], coords[CoordX], &colComm);
-    int rootRowRank = 0, rootColRank = 0;
-    // add communicators to resources
-    add_resource(&gridComm, mpi_comm_free_wrapper);
-    add_resource(&rowComm, mpi_comm_free_wrapper);
-    add_resource(&colComm, mpi_comm_free_wrapper);
-
-    // create matrices A, B, C in the main process
-    Matrix *matA = NULL, *matB = NULL, *matC = NULL;
-    if (gridRank == rootGridRank) {
-        matA = matrix_create(matArows, matAcols);
-        matB = matrix_create(matAcols, matBcols);
-        matC = matrix_create(matArows, matBcols);
-        add_resource(matA, matrix_destroy_wrapper);
-        add_resource(matB, matrix_destroy_wrapper);
-        add_resource(matC, matrix_destroy_wrapper);
-        assert_with_resources(matA && matB && matC, "Failed to allocate the required amount of memory");
-
-        matrix_randomize(matA, 1.0);
-        matrix_randomize(matB, 1.0);
-    }
-    // create submatrices of A, B, C in all processes
-    int submatAcols = matAcols;
-    int submatArows = get_chunk_size(coords[CoordX], gridRows, matArows);
-    int submatBcols = get_chunk_size(coords[CoordY], gridCols, matBcols);
-    Matrix *submatA = matrix_create(submatArows, submatAcols);
-    Matrix *submatB = matrix_create(submatAcols, submatBcols);
-    Matrix *submatC = matrix_create(submatArows, submatBcols);
-    add_resource(submatA, matrix_destroy_wrapper);
-    add_resource(submatB, matrix_destroy_wrapper);
-    add_resource(submatC, matrix_destroy_wrapper);
-    assert_with_resources(submatA && submatB && submatC, "Failed to allocate the required amount of memory");
-
-    // distribute matrices A, B between the processes
-    int *matAchunkSizes = (int*)calloc((size_t)gridRows, sizeof(int));
-    int *matAchunkOffsets = (int*)calloc((size_t)gridRows, sizeof(int));
-    int *matBchunkSizes = (int*)calloc((size_t)gridCols, sizeof(int));
-    int *matBchunkOffsets = (int*)calloc((size_t)gridCols, sizeof(int));
-    int *matCchunkSizes = (int*)calloc((size_t)(gridRows * gridCols), sizeof(int));
-    int *matCchunkOffsets = (int*)calloc((size_t)(gridRows * gridCols), sizeof(int));
-    add_resource(matAchunkSizes, free);
-    add_resource(matAchunkOffsets, free);
-    add_resource(matBchunkSizes, free);
-    add_resource(matBchunkOffsets, free);
-    add_resource(matCchunkSizes, free);
-    add_resource(matCchunkOffsets, free);
-    assert_with_resources(matAchunkSizes && matAchunkOffsets && matBchunkSizes && matBchunkOffsets && matCchunkSizes && matCchunkOffsets,
-                          "Failed to allocate the required amount of memory");
-    for (int row = 0, offset = 0; row < gridRows; ++row) {
-        matAchunkSizes[row] = get_chunk_size(row, gridRows, matArows) * matAcols;
-        matAchunkOffsets[row] = offset;
-        offset += matAchunkSizes[row];
-    }
-    for (int col = 0, offset = 0; col < gridCols; ++col) {
-        matBchunkSizes[col] = get_chunk_size(col, gridCols, matBcols) * matAcols;
-        matBchunkOffsets[col] = offset;
-        offset += matBchunkSizes[col];
-    }
-    for (int row = 0; row < gridRows; ++row) {
-        for (int col = 0; col < gridCols; ++col) {
-            matCchunkSizes[row * gridCols + col] = get_chunk_size(col, gridCols, matBcols);
-            matCchunkOffsets[row * gridCols + col] = get_chunk_offset(col, gridCols, matBcols)
-                    + get_chunk_offset(row, gridRows, matArows) * matBcols;
-        }
-    }
-
-    double beg = MPI_Wtime();
-    // scatter matrix A within the first column
-    if (coords[CoordY] == 0) {
-        MPI_Barrier(colComm);
-        MPI_Scatterv(gridRank == rootGridRank ? matA->data : NULL, matAchunkSizes, matAchunkOffsets, MPI_DOUBLE,
-                     submatA->data, submatA->rows * submatA->cols, MPI_DOUBLE, rootColRank, colComm);
-    }
-    // scatter matrix B within the first row
-    if (coords[CoordX] == 0) {
-        if (gridRank == rootGridRank) {
-            matrix_transpose(matB);
-        }
-        swap_ints(&submatB->rows, &submatB->cols);
-        MPI_Scatterv(gridRank == rootGridRank ? matB->data : NULL, matBchunkSizes, matBchunkOffsets, MPI_DOUBLE,
-                     submatB->data, submatB->rows * submatB->cols, MPI_DOUBLE, rootRowRank, rowComm);
-        // submatrices of B are transposed, transposition is required
-        matrix_transpose(submatB);
-    }
-    // broadcast submatrix of A to other columns in the grid
-    MPI_Bcast(submatA->data, submatA->rows * submatA->cols, MPI_DOUBLE, rootRowRank, rowComm);
-    // broadcast submatrix of B to other rows in the grid
-    MPI_Bcast(submatB->data, submatB->rows * submatB->cols, MPI_DOUBLE, rootColRank, colComm);
-    // multiplicate submatrices
-    matrix_mult(submatA, submatB, submatC);
-    // gather a part of result in the main process
-    int linesToSend = get_chunk_size(gridRows - 1, gridRows, matArows);
-    for (int i = 0; i < linesToSend; ++i) {
-        MPI_Gatherv(submatC->data + i * submatC->cols, submatC->cols, MPI_DOUBLE,
-                    (gridRank == rootGridRank) ? matC->data + i * matC->cols: NULL,
-                    matCchunkSizes, matCchunkOffsets, MPI_DOUBLE, rootGridRank, gridComm);
-    }
-    // check whether the matrix C was fully assembled; if not - gather the remaining lines
-    if (matArows % gridRows != 0) {
-        // create 2 subcommunicators: the processes which have one more line to send and those which don't
-        MPI_Comm subComm;
-        int hasLinesToSend = (submatC->rows == linesToSend) ? FALSE : TRUE;
-        MPI_Comm_split(gridComm, hasLinesToSend, gridRank, &subComm);
-        // set cartesian topology in these subcommunicators
-        MPI_Comm subgridComm;
-        dims[ROWS_DIM] = hasLinesToSend ? (matArows % gridRows) : (gridRows - matArows % gridRows);
-        dims[COLS_DIM] = gridCols;
-        reorder = FALSE;
-        MPI_Cart_create(subComm, NDIMS, dims, periods, reorder, &subgridComm);
-        // gather the remainder of the matrix C
-        if (hasLinesToSend) {
-            MPI_Gatherv(submatC->data + linesToSend * submatC->cols, submatC->cols, MPI_DOUBLE,
-                        (gridRank == rootGridRank) ? matC->data + linesToSend * matC->cols: NULL,
-                        matCchunkSizes, matCchunkOffsets, MPI_DOUBLE, rootGridRank, subgridComm);
-        }
-        MPI_Comm_free(&subComm);
-        MPI_Comm_free(&subgridComm);
-    }
-
-    double end = MPI_Wtime();
-    if (gridRank == rootGridRank) {
-        printf("Elapsed time: %.3fs\n", end - beg);
-    }
-
-    free_resources();
     MPI_Finalize();
+
+    return EXIT_SUCCESS;
 }

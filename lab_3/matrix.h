@@ -33,6 +33,6 @@ int matrix_inner_product(Matrix *mat1, Matrix *mat2, double *result);
 
 double get_norm_2(Matrix *mat);
 
-void matrix_randomize(Matrix *mat, int amp);
+void matrix_randomize(Matrix *mat, double amp);
 
 #endif // MATRIX_H

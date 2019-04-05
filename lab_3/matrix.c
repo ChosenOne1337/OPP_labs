@@ -163,7 +163,7 @@ double get_norm_2(Matrix *mat) {
     return sqrt(normSquared);
 }
 
-void matrix_randomize(Matrix *mat, int amp) {
+void matrix_randomize(Matrix *mat, double amp) {
     for (int row = 0; row < mat->rows; ++row) {
         for (int col = 0; col < mat->cols; ++col) {
             elem_at(mat, row, col) = amp * (2.0 * rand() / RAND_MAX - 1.0);
