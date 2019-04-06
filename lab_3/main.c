@@ -60,11 +60,13 @@ int create_matrices(Matrix **matA, Matrix **matB, Matrix **matC,
             return FAILURE_CODE;
         }
     }
+
     int submatAcols = params->matAcols;
     int submatArows = get_chunk_size(coords[RowDim], params->gridRows, params->matArows);
+    int submatBrows = params->matBrows;
     int submatBcols = get_chunk_size(coords[ColDim], params->gridCols, params->matBcols);
     *submatA = matrix_create(submatArows, submatAcols);
-    *submatB = matrix_create(submatAcols, submatBcols);
+    *submatB = matrix_create(submatBrows, submatBcols);
     *submatC = matrix_create(submatArows, submatBcols);
 
     if (*submatA && *submatB && *submatC) {
@@ -107,9 +109,9 @@ void create_grid_communicators(TaskParams *params) {
     MPI_Cart_coords(gridComm, gridRank, NDIMS, coords);
     // get rows and cols communicators in the grid
     int remainDims[NDIMS];
-    remainDims[RowDim] = TRUE; remainDims[ColDim] = FALSE;
-    MPI_Cart_sub(gridComm, remainDims, &rowComm);
     remainDims[RowDim] = FALSE; remainDims[ColDim] = TRUE;
+    MPI_Cart_sub(gridComm, remainDims, &rowComm);
+    remainDims[RowDim] = TRUE; remainDims[ColDim] = FALSE;
     MPI_Cart_sub(gridComm, remainDims, &colComm);
 }
 
@@ -120,17 +122,27 @@ void free_grid_communicators(void) {
 }
 
 void create_mpi_datatypes(TaskParams *params) {
+    MPI_Datatype newType;
+    MPI_Aint lb;
+    MPI_Aint doubleExtent;
+    MPI_Type_extent(MPI_DOUBLE, &doubleExtent);
+
     // vertical strips of matrix B
     int numberOfBlocks = params->matBrows;
     int blockLength = params->matBcols / params->gridCols;
     int stride = params->matBcols;
-    MPI_Type_vector(numberOfBlocks, blockLength, stride, MPI_DOUBLE, &stripType);
+    MPI_Type_vector(numberOfBlocks, blockLength, stride, MPI_DOUBLE, &newType);
+    MPI_Type_lb(newType, &lb);
+    MPI_Type_create_resized(newType, lb, doubleExtent * blockLength, &stripType);
     MPI_Type_commit(&stripType);
+
     // submatrices of matrix C
     numberOfBlocks = params->matArows / params->gridRows;
     blockLength = params->matBcols / params->gridCols;
     stride = params->matBcols;
-    MPI_Type_vector(numberOfBlocks, blockLength, stride, MPI_DOUBLE, &submatType);
+    MPI_Type_vector(numberOfBlocks, blockLength, stride, MPI_DOUBLE, &newType);
+    MPI_Type_lb(newType, &lb);
+    MPI_Type_create_resized(newType, lb, doubleExtent * blockLength, &submatType);
     MPI_Type_commit(&submatType);
 }
 
@@ -148,21 +160,9 @@ void distribute_matrices(Matrix *matA, Matrix *matB, Matrix *submatA, Matrix *su
 
     // scatter matrix B
     if (coords[RowDim] == 0) {
-        int *sendCounts = NULL, *sendDispls = NULL;
-        if (gridRank == rootRank) {
-            sendCounts = (int*)calloc((size_t)params->gridCols, sizeof(int));
-            sendDispls = (int*)calloc((size_t)params->gridCols, sizeof(int));
-            for (int stripIndex = 0; stripIndex < params->gridCols; ++stripIndex) {
-                sendCounts[stripIndex] = 1;
-                sendDispls[stripIndex] = get_chunk_offset(stripIndex, params->gridCols, params->matBcols);
-            }
-        }
-
-        MPI_Scatterv(gridRank == rootRank ? matB->data : NULL, sendCounts, sendDispls, stripType,
-                     submatB->data, submatB->rows * submatB->cols, MPI_DOUBLE, rootRank, rowComm);
-
-        free(sendCounts);
-        free(sendDispls);
+        int sendCount = 1;
+        MPI_Scatter(gridRank == rootRank ? matB->data : NULL, sendCount, stripType,
+                    submatB->data, submatB->rows * submatB->cols, MPI_DOUBLE, rootRank, rowComm);
     }
 
     // broadcast matrices A and B
@@ -180,8 +180,7 @@ void assemble_result(Matrix *matC, Matrix *submatC, TaskParams *params) {
         for (int row = 0; row < params->gridRows; ++row) {
             for (int col = 0; col < params->gridCols; ++col) {
                 recvCounts[row * params->gridCols + col] = 1;
-                recvDispls[row * params->gridCols + col] = get_chunk_offset(col, params->gridCols, matC->cols)
-                        + get_chunk_offset(row, params->gridRows, matC->rows) * matC->cols;
+                recvDispls[row * params->gridCols + col] = row * submatC->rows * params->gridCols + col;
             }
         }
     }
@@ -240,10 +239,12 @@ void calculate(TaskParams *params) {
     assemble_result(matC, submatC, params);
     double end = MPI_Wtime();
 
-    int resultIsValid = check_result(matA, matB, matC);
-    printf("Result is %s!\n"
-           "Elapsed time: %g\n",
-           resultIsValid ? "valid" : "invalid", end - beg);
+    if (gridRank == rootRank) {
+        int resultIsValid = check_result(matA, matB, matC);
+        printf("Result is %s!\n"
+               "Elapsed time: %g\n",
+               resultIsValid ? "valid" : "invalid", end - beg);
+    }
 
     free_mpi_datatypes();
     free_grid_communicators();
@@ -259,6 +260,7 @@ int main(int argc, char *argv[]) {
         print_usage(argv[0]);
         return EXIT_FAILURE;
     }
+
     int returnCode = 0;
     long N1, N2, N3, P1, P2;
     returnCode |= parse_long(&N1, argv[N1_arg]);
@@ -276,27 +278,38 @@ int main(int argc, char *argv[]) {
     }
     if (N1 > INT_MAX || N2 > INT_MAX || N3 > INT_MAX || P1 > INT_MAX || P2 > INT_MAX) {
         fprintf(stderr, "Parameters can't be > %d\n", INT_MAX);
+        return EXIT_FAILURE;
     }
     if (N1 < P1 || N3 < P2) {
         fprintf(stderr, "Invalid sizes of matrices parts\n");
         return EXIT_FAILURE;
     }
 
+    int procNum = 0, procRank = 0;
     MPI_Init(NULL, NULL);
-    int procNum = 0;
     MPI_Comm_size(MPI_COMM_WORLD, &procNum);
-    if (procNum != P1 * P2) {
-        fprintf(stderr, "Number of nodes in the grid has to be equal to the number of MPI processes\n");
-    } else if (N1 % P1 != 0) {
-        fprintf(stderr, "Number of rows in the matrix A has to be divisible by the number of rows in the grid\n");
-    } else if (N3 % P2 != 0) {
-        fprintf(stderr, "Number of cols in the matrix B has to be divisible by the number of cols in the grid\n");
-    } else {
-        TaskParams params = {.matArows = (int)N1, .matAcols = (int)N2,
-                             .matBrows = (int)N2, .matBcols = (int)N3,
-                             .gridRows = (int)P1, .gridCols = (int)P2};
-        calculate(&params);
+    MPI_Comm_rank(MPI_COMM_WORLD, &procRank);
+    if (procRank == 0) {
+        if (procNum != P1 * P2) {
+            fprintf(stderr, "Number of nodes in the grid has to be equal to the number of MPI processes\n");
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+        }
+        if (N1 % P1 != 0) {
+            fprintf(stderr, "Number of rows in the matrix A has to be divisible by the number of rows in the grid\n");
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+        }
+        if (N3 % P2 != 0) {
+            fprintf(stderr, "Number of cols in the matrix B has to be divisible by the number of cols in the grid\n");
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+        }
     }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    TaskParams params = {.matArows = (int)N1, .matAcols = (int)N2,
+                         .matBrows = (int)N2, .matBcols = (int)N3,
+                         .gridRows = (int)P1, .gridCols = (int)P2};
+    calculate(&params);
+
     MPI_Finalize();
 
     return EXIT_SUCCESS;
