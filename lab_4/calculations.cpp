@@ -1,5 +1,6 @@
 #include <mpich/mpi.h>
 #include <memory>
+#include <cmath>
 #include "calculations.h"
 #include "discretefunc.h"
 #include "utils.h"
@@ -19,12 +20,16 @@ namespace {
     int rootRank = 0;
     MPI_Comm gridComm;
 
+    double stepX, stepY, stepZ;
+
+    double parameterA = 1e+5;
+
     double phi(double x, double y, double z) {
         return x * x + y * y + z * z;
     }
 
-    double rho(double x, double y, double z, double a) {
-        return 6 - a * phi(x, y, z);
+    double rho(double x, double y, double z) {
+        return 6 - parameterA * phi(x, y, z);
     }
 
     void create_grid_communicator(int procNum) {
@@ -38,12 +43,31 @@ namespace {
         MPI_Cart_rank(gridComm, coords, &gridRank);
     }
 
+    void addShadowEdges(Domain &domain, Grid &grid) {
+        if (coords[Coords::RowDim] != 0) {
+            domain.extent.lenZ += stepZ;
+            grid.nodesZ += 1;
+        }
+
+        if (coords[Coords::RowDim] != dims[Coords::RowDim] - 1) {
+            domain.extent.lenZ += stepZ;
+            domain.origin.z -= stepZ;
+            grid.nodesZ += 1;
+        }
+
+        if (coords[Coords::ColDim] != 0) {
+            domain.extent.lenY += stepY;
+            domain.origin.y -= stepY;
+            grid.nodesY += 1;
+        }
+
+        if (coords[Coords::ColDim] != dims[Coords::ColDim] - 1) {
+            domain.extent.lenY += stepY;
+            grid.nodesY += 1;
+        }
+    }
 
     DiscreteFunc getPartialFunc(const Domain &domain, const Grid &grid) {
-        double stepX = domain.extent.lenX / (grid.nodesX - 1);
-        double stepY = domain.extent.lenY / (grid.nodesY - 1);
-        double stepZ = domain.extent.lenZ / (grid.nodesZ - 1);
-
         int newNodesX = grid.nodesX;
         int newNodesY = get_chunk_size(coords[Coords::ColDim], dims[Coords::ColDim], grid.nodesY);
         int newNodesZ = get_chunk_size(dims[Coords::RowDim] - coords[Coords::RowDim] - 1,
@@ -64,7 +88,9 @@ namespace {
         Domain partialDomain(newX0, newY0, newZ0, newLenX, newLenY, newLenZ);
         Grid partialGrid(newNodesX, newNodesY, newNodesZ);
 
-        // add shadow edges
+        addShadowEdges(partialDomain, partialGrid);
+
+        return DiscreteFunc(partialDomain, partialGrid);
     }
 
     void setEdgeValues(DiscreteFunc &partialFunc) {
@@ -88,12 +114,115 @@ namespace {
         }
     }
 
-    void check_result(DiscreteFunc &func) {
+    double iterationFunction(DiscreteFunc &prevFunc, int x, int y, int z) {
+        const static double reciprocalSquaredStepX = stepX * stepX;
+        const static double reciprocalSquaredStepY = stepY * stepY;
+        const static double reciprocalSquaredStepZ = stepZ * stepZ;
+        const static double multiplier = 1.0 / (2.0 * reciprocalSquaredStepX + 2.0 * reciprocalSquaredStepY
+                                                + 2.0 * reciprocalSquaredStepZ + parameterA);
+
+        double partX = reciprocalSquaredStepX * (prevFunc.getValue(x + 1, y, z) + prevFunc.getValue(x - 1, y, z));
+        double partY = reciprocalSquaredStepY * (prevFunc.getValue(x, y + 1, z) + prevFunc.getValue(x, y - 1, z));
+        double partZ = reciprocalSquaredStepZ * (prevFunc.getValue(x, y, z + 1) + prevFunc.getValue(x, y, z - 1));
+
+        return multiplier * (partX + partY + partZ - rho(x, y, z));
+    }
+
+    void calculateNextIteration(DiscreteFunc &currPartialFunc, DiscreteFunc &prevPartialFunc) {
+        const Grid &grid = currPartialFunc.getGrid();
+        if (grid.nodesX == 2 || grid.nodesY == 2 || grid.nodesZ == 2) {
+            // grid consists of border and shadow edges
+            return;
+        }
+
+        double val = 0.0;
+        for (int z = 1; z < grid.nodesZ - 1; ++z) {
+            for (int y = 1; y < grid.nodesY - 1; ++y) {
+                for (int x = 1; x < grid.nodesX - 1; ++x) {
+                    val = iterationFunction(prevPartialFunc, x, y, z);
+                    currPartialFunc.setValue(val, x, y, z);
+                }
+            }
+        }
+    }
+
+    void calculateRemainder(DiscreteFunc &currPartialFunc, DiscreteFunc &prevPartialFunc) {
+        const Grid &grid = currPartialFunc.getGrid();
+        if (grid.nodesX == 2 || grid.nodesY == 2 || grid.nodesZ == 2) {
+            // grid consists of border and shadow edges
+            return;
+        }
+
+        double val = 0.0;
+
+        if (coords[Coords::RowDim] != 0) {
+            int z = grid.nodesZ - 2;
+            for (int y = 1; y < grid.nodesY - 1; ++y) {
+                for (int x = 1; x < grid.nodesX - 1; ++x) {
+                    val = iterationFunction(prevPartialFunc, x, y, z);
+                    currPartialFunc.setValue(val, x, y, z);
+                }
+            }
+        }
+
+        if (coords[Coords::RowDim] != dims[Coords::RowDim] - 1) {
+            int z = 1;
+            for (int y = 1; y < grid.nodesY - 1; ++y) {
+                for (int x = 1; x < grid.nodesX - 1; ++x) {
+                    val = iterationFunction(prevPartialFunc, x, y, z);
+                    currPartialFunc.setValue(val, x, y, z);
+                }
+            }
+        }
+
+        if (coords[Coords::ColDim] != 0) {
+            int y = 1;
+            for (int z = 1; z < grid.nodesZ - 1; ++z) {
+                for (int x = 1; x < grid.nodesX - 1; ++x) {
+                    val = iterationFunction(prevPartialFunc, x, y, z);
+                    currPartialFunc.setValue(val, x, y, z);
+                }
+            }
+        }
+
+        if (coords[Coords::ColDim] != dims[Coords::ColDim] - 1) {
+            int y = grid.nodesY - 2;
+            for (int z = 1; z < grid.nodesZ - 1; ++z) {
+                for (int x = 1; x < grid.nodesX - 1; ++x) {
+                    val = iterationFunction(prevPartialFunc, x, y, z);
+                    currPartialFunc.setValue(val, x, y, z);
+                }
+            }
+        }
+    }
+
+    double getMaxDelta(DiscreteFunc &func1, DiscreteFunc &func2) {
+        // grids and domains are supposed to be the same
+        const Grid &grid = func1.getGrid();
+
+        double maxDelta = 0.0, delta = 0.0;
+        for (int z = 0; z < grid.nodesZ; ++z) {
+            for (int y = 0; y < grid.nodesY; ++y) {
+                for (int x = 0; x < grid.nodesX; ++x) {
+                    delta = std::abs(func1.getValue(x, y, z) - func2.getValue(x, y, z));
+                    if (delta > maxDelta) {
+                        maxDelta = delta;
+                    }
+                }
+            }
+        }
+
+        return maxDelta;
+    }
+
+    double check_result(DiscreteFunc &func) {
         const Domain &domain = func.getDomain();
         const Grid &grid = func.getGrid();
+
         DiscreteFunc realFunc(domain, grid);
         realFunc.setValues(phi);
 
+        return getMaxDelta(realFunc, func);
     }
 
 } // anonymous namespace
@@ -107,11 +236,44 @@ void calculate(int procNum, int nodesX, int nodesY, int nodesZ, double eps) {
     Grid grid(nodesX, nodesY, nodesZ);
     DiscreteFunc fullFunc = (gridRank == rootRank) ? DiscreteFunc(domain, grid) : DiscreteFunc();
 
-    DiscreteFunc partialFunc = getPartialFunc(domain, grid);
-    setEdgeValues(partialFunc);
+    stepX = domain.extent.lenX / (grid.nodesX - 1.0);
+    stepY = domain.extent.lenY / (grid.nodesY - 1.0);
+    stepZ = domain.extent.lenZ / (grid.nodesZ - 1.0);
+
+    DiscreteFunc currPartialFunc = getPartialFunc(domain, grid);
+    DiscreteFunc prevPartialFunc = getPartialFunc(domain, grid);
+    setEdgeValues(currPartialFunc);
+
+    struct {
+        double val;
+        int rank;
+    } maxDelta, localDelta;
+    localDelta.rank = gridRank;
+
+    double beg = MPI_Wtime();
+
+    do {
+        std::swap(currPartialFunc, prevPartialFunc);
+
+        // send shadow edges
+
+        calculateNextIteration(currPartialFunc, prevPartialFunc);
+
+        // wait until processes exchange shadow edges
+
+        calculateRemainder(currPartialFunc, prevPartialFunc);
+
+        // calculate delta
+        localDelta.val = getMaxDelta(currPartialFunc, prevPartialFunc);
+        MPI_Allreduce(&localDelta, &maxDelta, 1, MPI_DOUBLE_INT, MPI_MAXLOC, gridComm);
+    } while (maxDelta.val >= eps);
+
+    double end = MPI_Wtime();
 
     if (gridRank == rootRank) {
-        check_result(fullFunc);
+        printf("Elapsed time: %.3f\n", end - beg);
+        double error = check_result(fullFunc);
+        printf("Maximum delta: %g\n", error);
     }
 
     MPI_Comm_free(&gridComm);
