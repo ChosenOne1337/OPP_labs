@@ -3,6 +3,6 @@
 
 #include <cstddef>
 
-void calculate(int procNum, std::size_t nodesX, std::size_t nodesY, std::size_t nodesZ, double eps);
+void calculate(int procNum, std::int nodesX, std::int nodesY, std::int nodesZ, double eps);
 
 #endif // CALCULATIONS_H
