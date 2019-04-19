@@ -16,7 +16,7 @@ namespace Argv {
 
 void print_usage(char *progPath) {
     std::cerr << "Usage: " << basename(progPath)
-              << " <N1> <N2> <N3> <eps>" << std::endl;
+              << " <Nx> <Ny> <Nz> <eps>" << std::endl;
 }
 
 void parse_parameters(char *argv[], int &N1, int &N2, int &N3, double &eps) {
@@ -32,15 +32,19 @@ void parse_parameters(char *argv[], int &N1, int &N2, int &N3, double &eps) {
     }
 }
 
-void check_parameters(int procNum, int N1, int N2, int N3, double eps) {
-    if (N1 < procNum) {
-        throw std::invalid_argument("N1 is less than number of processes");
+void check_parameters(int procNum, int Nx, int Ny, int Nz, double eps) {
+    if (Nx <= 1) {
+        throw std::invalid_argument("(Nx - 1) is less than or equal to 0");
     }
-    if (N2 < procNum) {
-        throw std::invalid_argument("N2 is less than number of processes");
+    if (Ny - 1 < procNum) {
+        throw std::invalid_argument("(Ny - 1) is less than number of processes");
     }
-    if (N3 < procNum) {
-        throw std::invalid_argument("N3 is less than number of processes");
+    if (Nz - 1 < procNum) {
+        throw std::invalid_argument("(Nz - 1) is less than number of processes");
+    }
+    if (Nx == 2 || Ny == 2 || Nz == 2) {
+        throw std::invalid_argument("One of the grid dimension's size == 2, "
+                                    "i.e. grid contains only its border");
     }
     if (eps <= 0.0) {
         throw std::invalid_argument("eps is <= 0.0");
@@ -56,15 +60,15 @@ int main(int argc, char *argv[]) {
 
     try {
         double eps;
-        int N1, N2, N3;
-        parse_parameters(argv, N1, N2, N3, eps);
+        int Nx, Ny, Nz;
+        parse_parameters(argv, Nx, Ny, Nz, eps);
 
         int procNum = 0;
         MPI_Init(nullptr, nullptr);
         MPI_Comm_size(MPI_COMM_WORLD, &procNum);
 
-        check_parameters(procNum, N1, N2, N3, eps);
-        calculate(procNum, N1, N2, N3, eps);
+        check_parameters(procNum, Nx, Ny, Nz, eps);
+        calculate(procNum, Nx, Ny, Nz, eps);
 
         MPI_Finalize();
     } catch (const std::invalid_argument &ex) {

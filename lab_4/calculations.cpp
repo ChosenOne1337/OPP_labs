@@ -14,23 +14,70 @@ namespace {
         };
     }
 
+    namespace Request {
+        enum {
+            LeftIndex,
+            TopIndex,
+            RightIndex,
+            BottomIndex,
+            TotalRequests
+        };
+    }
+
+    namespace Neighbor {
+        enum {
+            LeftIndex,
+            TopIndex,
+            RightIndex,
+            BottomIndex,
+            TotalNeighbors
+        };
+    }
+
+    namespace Edge {
+        enum {
+            LeftIndex,
+            TopIndex,
+            RightIndex,
+            BottomIndex,
+            TotalEdges
+        };
+    }
+
+
+
+    MPI_Comm gridComm;
     int coords[Coords::TotalDims];
     int dims[Coords::TotalDims];
     int gridRank;
     int rootRank = 0;
-    MPI_Comm gridComm;
+    int neighborsRanks[Neighbor::TotalNeighbors];
+
+    MPI_Request sendRequests[Request::TotalRequests] = {
+        MPI_REQUEST_NULL, MPI_REQUEST_NULL,
+        MPI_REQUEST_NULL, MPI_REQUEST_NULL
+    };
+    MPI_Request recvRequests[Request::TotalRequests] = {
+        MPI_REQUEST_NULL, MPI_REQUEST_NULL,
+        MPI_REQUEST_NULL, MPI_REQUEST_NULL
+    };
+
+    MPI_Datatype edgesTypes[Edge::TotalEdges];
 
     double stepX, stepY, stepZ;
-
     double parameterA = 1e+5;
+
+
 
     double phi(double x, double y, double z) {
         return x * x + y * y + z * z;
     }
 
     double rho(double x, double y, double z) {
-        return 6 - parameterA * phi(x, y, z);
+        return 6.0 - parameterA * phi(x, y, z);
     }
+
+
 
     void create_grid_communicator(int procNum) {
         MPI_Dims_create(procNum, Coords::TotalDims, dims);
@@ -41,7 +88,75 @@ namespace {
         MPI_Cart_create(MPI_COMM_WORLD, Coords::TotalDims, dims, periods, reorder, &gridComm);
         MPI_Cart_get(gridComm, Coords::TotalDims, dims, periods, coords);
         MPI_Cart_rank(gridComm, coords, &gridRank);
+
+        MPI_Cart_shift(gridComm, Coords::RowDim, 1,
+                       &neighborsRanks[Neighbor::LeftIndex], &neighborsRanks[Neighbor::RightIndex]);
+        MPI_Cart_shift(gridComm, Coords::ColDim, 1,
+                       &neighborsRanks[Neighbor::TopIndex], &neighborsRanks[Neighbor::BottomIndex]);
     }
+
+    void free_grid_communicator() {
+        MPI_Comm_free(&gridComm);
+    }
+
+
+
+    void create_edge_datatypes(const Grid &grid) {
+        for (MPI_Datatype &type: edgesTypes) {
+            type = MPI_DATATYPE_NULL;
+        }
+
+        int blocksCount = 1;
+        int blockLength = grid.nodesX * grid.nodesY;
+        int stride = 0;
+
+        if (coords[Coords::RowDim] != 0) {
+            MPI_Type_vector(blocksCount, blockLength, stride, MPI_DOUBLE, &edgesTypes[Edge::TopIndex]);
+        }
+
+        if (coords[Coords::RowDim] != dims[Coords::RowDim] - 1) {
+            MPI_Type_vector(blocksCount, blockLength, stride, MPI_DOUBLE, &edgesTypes[Edge::BottomIndex]);
+        }
+
+
+        blocksCount = grid.nodesZ;
+        blockLength = grid.nodesX;
+        stride = grid.nodesX * grid.nodesY;
+
+        MPI_Datatype newType;
+        MPI_Aint lb;
+        MPI_Aint doubleExtent;
+        MPI_Type_extent(MPI_DOUBLE, &doubleExtent);
+
+        if (coords[Coords::ColDim] != 0) {
+            MPI_Type_vector(blocksCount, blockLength, stride, MPI_DOUBLE, &newType);
+            MPI_Type_lb(newType, &lb);
+            MPI_Type_create_resized(newType, lb, doubleExtent * blockLength, &edgesTypes[Edge::LeftIndex]);
+        }
+
+        if (coords[Coords::ColDim] != dims[Coords::ColDim] - 1) {
+            MPI_Type_vector(blocksCount, blockLength, stride, MPI_DOUBLE, &newType);
+            MPI_Type_lb(newType, &lb);
+            MPI_Type_create_resized(newType, lb, doubleExtent * blockLength, &edgesTypes[Edge::RightIndex]);
+        }
+
+
+        for (MPI_Datatype &type: edgesTypes) {
+            if (type != MPI_DATATYPE_NULL) {
+                MPI_Type_commit(&type);
+            }
+        }
+    }
+
+    void free_edge_datatypes() {
+        for (MPI_Datatype &type: edgesTypes) {
+            if (type != MPI_DATATYPE_NULL) {
+                MPI_Type_free(&type);
+            }
+        }
+    }
+
+
 
     void addShadowEdges(Domain &domain, Grid &grid) {
         if (coords[Coords::RowDim] != 0) {
@@ -114,10 +229,12 @@ namespace {
         }
     }
 
+
+
     double iterationFunction(DiscreteFunc &prevFunc, int x, int y, int z) {
-        const static double reciprocalSquaredStepX = stepX * stepX;
-        const static double reciprocalSquaredStepY = stepY * stepY;
-        const static double reciprocalSquaredStepZ = stepZ * stepZ;
+        const static double reciprocalSquaredStepX = 1.0 / (stepX * stepX);
+        const static double reciprocalSquaredStepY = 1.0 / (stepY * stepY);
+        const static double reciprocalSquaredStepZ = 1.0 / (stepZ * stepZ);
         const static double multiplier = 1.0 / (2.0 * reciprocalSquaredStepX + 2.0 * reciprocalSquaredStepY
                                                 + 2.0 * reciprocalSquaredStepZ + parameterA);
 
@@ -196,85 +313,156 @@ namespace {
         }
     }
 
-    double getMaxDelta(DiscreteFunc &func1, DiscreteFunc &func2) {
+
+
+    void exchange_edges(DiscreteFunc &partialFunc, int edgeIndex, int neighborIndex, int requestIndex) {
+        const static int tag = 42;
+        const static int sendCount = 1, recvCount = 1;
+
+        const Grid &grid = partialFunc.getGrid();
+        int sendDisplacement = 0, recvDisplacement = 0;
+
+        switch (edgeIndex) {
+        case Edge::LeftIndex:
+            recvDisplacement = 0;
+            sendDisplacement = 1;
+            break;
+        case Edge::RightIndex:
+            recvDisplacement = grid.nodesY - 1;
+            sendDisplacement = grid.nodesY - 2;
+            break;
+        case Edge::TopIndex:
+            recvDisplacement = grid.nodesZ - 1;
+            sendDisplacement = grid.nodesZ - 2;
+            break;
+        case Edge::BottomIndex:
+            recvDisplacement = 0;
+            sendDisplacement = 1;
+            break;
+        default:
+            return;
+        }
+
+        MPI_Isend(partialFunc.getData() + sendDisplacement, sendCount, edgesTypes[edgeIndex],
+                neighborsRanks[neighborIndex], tag, gridComm, &sendRequests[requestIndex]);
+        MPI_Irecv(partialFunc.getData() + recvDisplacement, recvCount, edgesTypes[edgeIndex],
+                neighborsRanks[neighborIndex], tag, gridComm, &recvRequests[requestIndex]);
+    }
+
+    void initiate_edge_interchange(DiscreteFunc &partialFunc) {
+        if (coords[Coords::RowDim] != 0) {
+            exchange_edges(partialFunc, Edge::TopIndex, Neighbor::TopIndex, Request::TopIndex);
+        }
+
+        if (coords[Coords::RowDim] != dims[Coords::RowDim] - 1) {
+            exchange_edges(partialFunc, Edge::BottomIndex, Neighbor::BottomIndex, Request::BottomIndex);
+        }
+
+        if (coords[Coords::ColDim] != 0) {
+            exchange_edges(partialFunc, Edge::LeftIndex, Neighbor::LeftIndex, Request::LeftIndex);
+        }
+
+        if (coords[Coords::ColDim] != dims[Coords::ColDim] - 1) {
+            exchange_edges(partialFunc, Edge::RightIndex, Neighbor::RightIndex, Request::RightIndex);
+        }
+    }
+
+    void finish_edge_interchange() {
+        MPI_Waitall(Neighbor::TotalNeighbors, recvRequests, MPI_STATUSES_IGNORE);
+    }
+
+
+
+    double getLocalDiff(DiscreteFunc &func1, DiscreteFunc &func2) {
         // grids and domains are supposed to be the same
         const Grid &grid = func1.getGrid();
+        if (grid.nodesX == 2 || grid.nodesY == 2 || grid.nodesZ == 2) {
+            // grid consists of border and shadow edges
+            return 0.0;
+        }
 
-        double maxDelta = 0.0, delta = 0.0;
-        for (int z = 0; z < grid.nodesZ; ++z) {
-            for (int y = 0; y < grid.nodesY; ++y) {
-                for (int x = 0; x < grid.nodesX; ++x) {
-                    delta = std::abs(func1.getValue(x, y, z) - func2.getValue(x, y, z));
-                    if (delta > maxDelta) {
-                        maxDelta = delta;
+        double maxLocalDiff = 0.0, localDiff = 0.0;
+        for (int z = 1; z < grid.nodesZ - 1; ++z) {
+            for (int y = 1; y < grid.nodesY - 1; ++y) {
+                for (int x = 1; x < grid.nodesX - 1; ++x) {
+                    localDiff = std::abs(func1.getValue(x, y, z) - func2.getValue(x, y, z));
+                    if (localDiff > maxLocalDiff) {
+                        maxLocalDiff = localDiff;
                     }
                 }
             }
         }
 
-        return maxDelta;
+        return maxLocalDiff;
     }
 
-    double check_result(DiscreteFunc &func) {
-        const Domain &domain = func.getDomain();
-        const Grid &grid = func.getGrid();
+    double getMaxDiff(DiscreteFunc &func1, DiscreteFunc &func2) {
+        struct {
+            double val;
+            int rank;
+        } maxDiff, localDiff;
 
-        DiscreteFunc realFunc(domain, grid);
-        realFunc.setValues(phi);
+        localDiff.rank = gridRank;
+        localDiff.val = getLocalDiff(func1, func2);
+        MPI_Allreduce(&localDiff, &maxDiff, 1, MPI_DOUBLE_INT, MPI_MAXLOC, gridComm);
 
-        return getMaxDelta(realFunc, func);
+        return maxDiff.val;
+    }
+
+    double check_result(DiscreteFunc &partialFunc) {
+        const Domain &domain = partialFunc.getDomain();
+        const Grid &grid = partialFunc.getGrid();
+
+        DiscreteFunc truePartialFunc(domain, grid);
+        truePartialFunc.setValues(phi);
+
+        return getLocalDiff(truePartialFunc, partialFunc);
     }
 
 } // anonymous namespace
 
-void calculate(int procNum, int nodesX, int nodesY, int nodesZ, double eps) {
-    create_grid_communicator(procNum);
 
+
+void calculate(int procNum, int nodesX, int nodesY, int nodesZ, double eps) {
     double x0 = -1.0, y0 = -1.0, z0 = -1.0;
     double lenX = 2.0, lenY = 2.0, lenZ = 2.0;
     Domain domain(x0, y0, z0, lenX, lenY, lenZ);
     Grid grid(nodesX, nodesY, nodesZ);
-    DiscreteFunc fullFunc = (gridRank == rootRank) ? DiscreteFunc(domain, grid) : DiscreteFunc();
 
     stepX = domain.extent.lenX / (grid.nodesX - 1.0);
     stepY = domain.extent.lenY / (grid.nodesY - 1.0);
     stepZ = domain.extent.lenZ / (grid.nodesZ - 1.0);
 
+    create_grid_communicator(procNum);
+
     DiscreteFunc currPartialFunc = getPartialFunc(domain, grid);
     DiscreteFunc prevPartialFunc = getPartialFunc(domain, grid);
     setEdgeValues(currPartialFunc);
 
-    struct {
-        double val;
-        int rank;
-    } maxDelta, localDelta;
-    localDelta.rank = gridRank;
+    create_edge_datatypes(currPartialFunc.getGrid());
 
+    double maxDiff = 0.0;
     double beg = MPI_Wtime();
 
     do {
         std::swap(currPartialFunc, prevPartialFunc);
 
-        // send shadow edges
-
+        initiate_edge_interchange(prevPartialFunc);
         calculateNextIteration(currPartialFunc, prevPartialFunc);
-
-        // wait until processes exchange shadow edges
+        finish_edge_interchange();
 
         calculateRemainder(currPartialFunc, prevPartialFunc);
-
-        // calculate delta
-        localDelta.val = getMaxDelta(currPartialFunc, prevPartialFunc);
-        MPI_Allreduce(&localDelta, &maxDelta, 1, MPI_DOUBLE_INT, MPI_MAXLOC, gridComm);
-    } while (maxDelta.val >= eps);
+        maxDiff = getMaxDiff(currPartialFunc, prevPartialFunc);
+    } while (maxDiff >= eps);
 
     double end = MPI_Wtime();
 
+    double delta = check_result(currPartialFunc);
     if (gridRank == rootRank) {
         printf("Elapsed time: %.3f\n", end - beg);
-        double error = check_result(fullFunc);
-        printf("Maximum delta: %g\n", error);
+        printf("Delta: %g\n", delta);
     }
 
-    MPI_Comm_free(&gridComm);
+    free_edge_datatypes();
+    free_grid_communicator();
 }

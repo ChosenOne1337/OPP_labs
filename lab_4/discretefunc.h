@@ -184,15 +184,15 @@ public:
         _data[linearIndex] = value;
     }
 
-    double* getRawData() {
+    double* getData() {
         return _data.get();
     }
 
-    const Grid& getGrid() {
+    const Grid& getGrid() const {
         return *_grid;
     }
 
-    const Domain& getDomain() {
+    const Domain& getDomain() const {
         return *_domain;
     }
 private:
