@@ -3,6 +3,6 @@
 
 #include <cstddef>
 
-void calculate(int procNum, int nodesX, int nodesY, int nodesZ, double eps);
+void calculate(int nodesX, int nodesY, int nodesZ, double eps);
 
 #endif // CALCULATIONS_H

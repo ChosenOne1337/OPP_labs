@@ -2,6 +2,7 @@
 #define DISCRETEFUNC_H
 
 #include <cstddef>
+#include <cstring>
 #include <memory>
 
 struct Domain {
@@ -48,16 +49,49 @@ struct Grid {
 
 class DiscreteFunc {
 public:
-    DiscreteFunc(): _stepX(), _stepY(), _stepZ() {}
+    friend void swap(DiscreteFunc&, DiscreteFunc&);
+
+    DiscreteFunc() = default;
+
+    ~DiscreteFunc() noexcept {
+        if (_data != nullptr) {
+            delete[] _data;
+            _data = nullptr;
+        }
+
+        if (_domain != nullptr) {
+            delete _domain;
+            _domain = nullptr;
+        }
+
+        if (_grid != nullptr) {
+            delete _grid;
+            _grid = nullptr;
+        }
+    }
 
     DiscreteFunc(const Domain &domain, const Grid &grid) {
         int nodesTotal = grid.nodesX * grid.nodesY * grid.nodesZ;
-        _data.reset(new double[nodesTotal]());
-        _domain.reset(new Domain(domain));
-        _grid.reset(new Grid(grid));
+        _data = new double[nodesTotal]();
+        _domain = new Domain(domain);
+        _grid = new Grid(grid);
         _stepX = _domain->extent.lenX / (_grid->nodesX - 1);
         _stepY = _domain->extent.lenY / (_grid->nodesY - 1);
         _stepZ = _domain->extent.lenZ / (_grid->nodesZ - 1);
+    }
+
+    DiscreteFunc(const DiscreteFunc &func): DiscreteFunc(func.getDomain(), func.getGrid()) {
+        int nodesTotal = _grid->nodesX * _grid->nodesY * _grid->nodesZ;
+        std::memcpy(_data, func.getData(), static_cast<std::size_t>(nodesTotal) * sizeof (double));
+    }
+
+    DiscreteFunc(DiscreteFunc &&func) noexcept: DiscreteFunc() {
+        swap(*this, func);
+    }
+
+    DiscreteFunc& operator= (DiscreteFunc func) noexcept {
+        swap(*this, func);
+        return *this;
     }
 
     template<typename Func>
@@ -185,7 +219,11 @@ public:
     }
 
     double* getData() {
-        return _data.get();
+        return _data;
+    }
+
+    const double* getData() const {
+        return _data;
     }
 
     const Grid& getGrid() const {
@@ -196,14 +234,26 @@ public:
         return *_domain;
     }
 private:
-    std::unique_ptr<double[]> _data;
-    std::unique_ptr<Domain> _domain;
-    std::unique_ptr<Grid> _grid;
-    double _stepX, _stepY, _stepZ;
+    double *_data = nullptr;
+    Domain *_domain = nullptr;
+    Grid *_grid = nullptr;
+    double _stepX = 0.0, _stepY = 0.0, _stepZ = 0.0;
 
     int _get_linear_data_index(int x, int y, int z) const {
         return z * _grid->nodesX * _grid->nodesY + y * _grid->nodesX + x;
     }
 };
+
+inline void swap(DiscreteFunc &func1, DiscreteFunc &func2) {
+    using std::swap;
+
+    swap(func1._data, func2._data);
+    swap(func1._domain, func2._domain);
+    swap(func1._grid, func2._grid);
+
+    swap(func1._stepX, func2._stepX);
+    swap(func1._stepY, func2._stepY);
+    swap(func1._stepZ, func2._stepZ);
+}
 
 #endif // DISCRETEFUNC_H
