@@ -60,7 +60,9 @@ private:
     }
 
     void send_message(int procRank, int tag, void *buf, int count, MPI_Datatype datatype) {
-        MPI_Send(buf, count, datatype, procRank, tag, _ringComm.get_communicator());
+        MPI_Request request;
+        MPI_Isend(buf, count, datatype, procRank, tag, _ringComm.get_communicator(), &request);
+        MPI_Request_free(&request);
     }
 
     void handle_request(ExecutionState &executionState, int procRank) {
@@ -69,8 +71,7 @@ private:
         auto tasksPending = executionState.get_threadpool().tasks_pending();
         auto tasks = executionState.cancel_tasks(tasksPending / 2);
 
-        MPI_Send(tasks.data(), static_cast<int>(tasks.size()), _taskType.get_datatype(),
-                 procRank, RESPONSE_TAG, _ringComm.get_communicator());
+        send_message(procRank, RESPONSE_TAG, tasks.data(), static_cast<int>(tasks.size()), _taskType.get_datatype());
     }
 
     void handle_response(ExecutionState &executionState, int procRank) {
@@ -136,9 +137,7 @@ private:
     void broadcast_shutdown_message() {
         int procNum = _ringComm.get_size();
         for (int procRank = 0; procRank < procNum; ++procRank) {
-            MPI_Request request;
-            MPI_Isend(nullptr, 0, MPI_INT, procRank, SHUTDOWN_TAG, _ringComm.get_communicator(), &request);
-            MPI_Request_free(&request);
+            send_message(procRank, SHUTDOWN_TAG, nullptr, 0, MPI_INT);
         }
     }
 

@@ -7,8 +7,8 @@
 
 class WorkController final {
 public:
-    WorkController(RingComm &ringComm, TaskDatatype &taskType):
-        _ringComm{ringComm}, _taskType{taskType} {}
+    WorkController(RingComm &ringComm):
+        _ringComm{ringComm} {}
 
     void control_work(ExecutionState &executionState) {
         std::size_t totalTasksCompleted = 0;
@@ -69,7 +69,6 @@ public:
 
 private:
     RingComm& _ringComm;
-    TaskDatatype& _taskType;
 
     std::mutex _mutex;
     std::condition_variable _cv;
@@ -95,28 +94,9 @@ private:
     }
 
     void send_message(int procRank, int tag, void *buf, int count, MPI_Datatype datatype) {
-        MPI_Send(buf, count, datatype, procRank, tag, _ringComm.get_communicator());
-    }
-
-    std::size_t request_tasks(ExecutionState &executionState, int procRank) {
-        MPI_Comm &comm = _ringComm.get_communicator();
-        MPI_Datatype &taskDatatype = _taskType.get_datatype();
-
-        MPI_Status status;
-        send_message(procRank, REQUEST_TAG, nullptr, 0, MPI_INT);
-        MPI_Probe(procRank, RESPONSE_TAG, comm, &status);
-
-        int tasksToReceive = 0;
-        MPI_Get_count(&status, taskDatatype, &tasksToReceive);
-        std::vector<Task> receivedTasks(static_cast<std::size_t>(tasksToReceive));
-        MPI_Recv(receivedTasks.data(), tasksToReceive, _taskType.get_datatype(),
-                    procRank, RESPONSE_TAG, comm, MPI_STATUS_IGNORE);
-
-        for (auto &task: receivedTasks) {
-            executionState.submit_task(std::move(task));
-        }
-
-        return receivedTasks.size();
+        MPI_Request request;
+        MPI_Isend(buf, count, datatype, procRank, tag, _ringComm.get_communicator(), &request);
+        MPI_Request_free(&request);
     }
 
     void notify_neighbors() {

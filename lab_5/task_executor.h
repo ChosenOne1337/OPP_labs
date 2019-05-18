@@ -20,7 +20,7 @@ public:
             executionState.submit_task(std::move(task));
         }
 
-        WorkController workController{_ringComm, _taskType};
+        WorkController workController{_ringComm};
         std::thread workControllerThread {
             std::bind(&WorkController::control_work, &workController, std::ref(executionState))
         };
